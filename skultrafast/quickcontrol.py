@@ -132,7 +132,7 @@ class QC2DSpec(QCBaseTimeRes):
     """Helper class to load 2D-spectra measured with QuickControl"""
 
     polarized_data: bool = attr.ib(init=False)
-    """Boolean flag of if data files are separated by polarization for determining how to handle data"""
+    """Boolean flag showing if data files are separated by polarization. Controls how some methods handle data files."""
     
     par_data: Dict = attr.ib(init=False)
     """Data for parallel polarization"""
@@ -192,17 +192,19 @@ class QC2DSpec(QCBaseTimeRes):
 
     def _loader(self, which: str):
         data_dict: Dict[int, np.ndarray] = {}
+        scanname = list(self.path.glob(self.prefix + f'*1.scan'))[0]
+        substring = (str(scanname).split('#')[-2]).split('T')[-1] # Get list of characters between the last two # symbols, and the take everything after the "T"
+        digit_count = len(substring.split("_")[0]) # Get the number of chars before the "_PAR" or "_PER".
 
         for t in range(len(self.t)):
             if self.polarized_data:
-                T = "_T%02d" % (t + 1)
+                T = f"_T{(t+1):0{digit_count}d}"
                 pol_scans = self.path.glob(self.prefix + T + f"_{which}*.scan")
                 if not pol_scans:
                     raise FileNotFoundError(f"No files found for {which} polarization")
             else:
-                T = "_T%03d" % (t + 1)
+                T = f"_T{(t+1):0{digit_count}d}"
                 pol_scans = self.path.glob(self.prefix + T + f'*.scan')
-            
             data = []
             for s in pol_scans:
                 d = np.loadtxt(s)
