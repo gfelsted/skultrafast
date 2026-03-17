@@ -131,17 +131,26 @@ class QC1DSpec(QCBaseTimeRes):
 class QC2DSpec(QCBaseTimeRes):
     """Helper class to load 2D-spectra measured with QuickControl"""
 
+    polarized_data: bool = attr.ib(init=False)
+    """Boolean flag of if data files are separated by polarization for determining how to handle data"""
+    
     par_data: Dict = attr.ib(init=False)
     """Data for parallel polarization"""
 
     per_data: Dict = attr.ib(init=False)
     """Data for perpendicular polarization"""
 
+    unpol_data: Dict = attr.ib(init=False)
+    """Data from detector modes that do not control polarization"""
+
     par_spec: Optional[Dict] = None
     """Resulting 2D spectra for parallel polarization"""
 
     per_spec: Optional[Dict] = None
     """Resulting 2D spectra for perpendicular polarization"""
+
+    unpol_spec: Optional[Dict] = None
+    """Resulting 2D spectra without polarization control"""
 
     probe_filter: Optional[float] = None
     """Size of the filter applied to the spectral axis. 'None' is no filtering"""
@@ -185,14 +194,19 @@ class QC2DSpec(QCBaseTimeRes):
         data_dict: Dict[int, np.ndarray] = {}
 
         for t in range(len(self.t)):
-            T = "_T%02d" % (t + 1)
-            pol_scans = self.path.glob(self.prefix + T + f"_{which}*.scan")
-            if not pol_scans:
-                raise FileNotFoundError(f"No files found for {which} polarization")
+            if self.polarized_data:
+                T = "_T%02d" % (t + 1)
+                pol_scans = self.path.glob(self.prefix + T + f"_{which}*.scan")
+                if not pol_scans:
+                    raise FileNotFoundError(f"No files found for {which} polarization")
+            else:
+                T = "_T%03d" % (t + 1)
+                pol_scans = self.path.glob(self.prefix + T + f'*.scan')
+            
             data = []
             for s in pol_scans:
                 d = np.loadtxt(s)
-                self.t2 = d[1:, 0]
+                self.t2 = d[:-1, 0]
                 data.append(d)
             if len(data) > 0:
                 d = np.array(data)
@@ -202,9 +216,31 @@ class QC2DSpec(QCBaseTimeRes):
                 break
         return data_dict
 
+    def _data_polarization(self):
+        """
+        Checks the detector used and detection mode to determine if the data files are for polarized or unpolarized data sets. 
+        True means there are polarized data files. False means there is no polarization distinction in the data files and the user must keep track.
+        """
+        detector_list = ['PhaseTech','PhaseTech 2DMCT','PhaseTech JackHammer IR', 'PhaseTech JackHammer Visible']
+        polarized_modes = ['Parallel, Perpendicular, & Reference', 'Para., Perp., & Reference', 'Parallel & Perpendicular']
+        unpolarized_modes = ['Probe', 'Probe & Reference']
+        if self.info['Detector'] in detector_list:
+            if self.info['Detection Mode'] in polarized_modes:
+                return True
+            elif self.info['Detection Mode'] in unpolarized_modes:
+                return False
+        elif self.info['Detector'] == 'IRSD' or self.info['Detector'] == 'IRSD 2': # Some QuickControl files do not list detection modes for IRSD systems, so treat it as unpolarized to prevent immediate errors.
+            return False
+        else:
+            raise Exception("Detector or Detection Mode not recognized. Unable to parse data files.")
+
     def __attrs_post_init__(self):
-        self.par_data = self._loader("PAR")
-        self.per_data = self._loader("PER")
+        self.polarized_data = self._data_polarization()
+        if self.polarized_data:
+            self.par_data = self._loader("PAR")
+            self.per_data = self._loader("PER")
+        else:
+            self.unpol_data = self._loader("")
         self.pump_freq = self._calc_freqs()
 
     def switch_pol(self):
@@ -212,62 +248,81 @@ class QC2DSpec(QCBaseTimeRes):
         self.par_spec, self.per_spec = self.per_spec, self.par_spec
 
     def calc_spec(self):
-        par_dict: Dict[int, np.ndarray] = {}
-        perp_dict: Dict[int, np.ndarray] = {}
-        for i, data in enumerate((self.par_data, self.per_data)):
+        if self.polarized_data:
+            par_dict: Dict[int, np.ndarray] = {}
+            perp_dict: Dict[int, np.ndarray] = {}
+            datadict = (par_dict,perp_dict)
+            datasets = (self.par_data, self.per_data)
+        else:
+            unpol_dict: Dict[int, np.ndarray] = {}
+            datadict = (unpol_dict,)
+            datasets = (self.unpol_data,)
+
+        for i, data in enumerate(datasets):
             for t in data:
                 d = np.nanmean(data[t], 0)
                 d = d[:-1, 1:]
 
                 if self.probe_filter is not None:
-                    d = gaussian_filter1d(d, self.probe_filter, -1, mode="nearest")
+                    d = gaussian_filter1d(d, self.probe_filter, -1, mode='nearest')
                 if self.bg_correct:
-                    poly_bg_correction(
-                        self.wavelength, d, self.bg_correct[0], self.bg_correct[1]
-                    )
+                    poly_bg_correction(self.wavelength, d,
+                                    self.bg_correct[0], self.bg_correct[1])
                 d[0, :] *= 0.5
                 if self.win_function is not None:
                     win = self.win_function(2 * len(self.t2))
                 else:
                     win = np.ones(2 * len(self.t2))
-                spec = np.fft.rfft(
-                    d * win[len(self.t2):, None],
-                    axis=0,
-                    n=self.upsampling * len(self.t2),
-                )
-                (par_dict, perp_dict)[i][t] = spec.real
-        return par_dict, perp_dict
+                spec = np.fft.rfft(d * win[len(self.t2):, None],
+                                axis=0,
+                                n=self.upsampling * len(self.t2))
+                datadict[i][t] = spec.real
+                
+        if self.polarized_data:
+            return par_dict, perp_dict
+        else:
+            return unpol_dict
 
     def _calc_freqs(self):
         freqs = np.fft.rfftfreq(self.upsampling * len(self.t2), self.t2[1] - self.t2[0])
-        om0 = self.info["Rotating Frame (Scanned)"]
+        om0 = self.info["Rotating Frame (Scanned)"] - self.info['Rotating Frame (Fixed)']
         with np.errstate(divide="ignore"):
             cm = 10 / ((1 / freqs) * 1e-12 * speed_of_light) + om0
             cm[0] = om0
         return cm
 
     def make_ds(self) -> Dict[str, TwoDim]:
-        par, perp = self.calc_spec()
-        self.pump_freq = self._calc_freqs()
-        par_arr = np.dstack(list(par.values())).T
-        per_arr = np.dstack(list(perp.values())).T
-        iso = (2 * per_arr + par_arr) / 3
+        if self.polarized_data:
+            par, perp = self.calc_spec()
+            self.pump_freq = self._calc_freqs()
+            par_arr = np.dstack(list(par.values())).T
+            per_arr = np.dstack(list(perp.values())).T
+            iso = (2 * per_arr + par_arr) / 3
 
-        d = {
-            "para": TwoDim(
-                t=self.t,
-                pump_wn=self.pump_freq,
-                probe_wn=self.wavenumbers,
-                spec2d=par_arr,
-            ),
-            "perp": TwoDim(
-                t=self.t,
-                pump_wn=self.pump_freq,
-                probe_wn=self.wavenumbers,
-                spec2d=per_arr,
-            ),
-            "iso": TwoDim(
-                t=self.t, pump_wn=self.pump_freq, probe_wn=self.wavenumbers, spec2d=iso
-            ),
-        }
-        return d
+            d = {
+                "para": TwoDim(
+                    t=self.t,
+                    pump_wn=self.pump_freq,
+                    probe_wn=self.wavenumbers,
+                    spec2d=par_arr,
+                ),
+                "perp": TwoDim(
+                    t=self.t,
+                    pump_wn=self.pump_freq,
+                    probe_wn=self.wavenumbers,
+                    spec2d=per_arr,
+                ),
+                "iso": TwoDim(
+                    t=self.t, 
+                    pump_wn=self.pump_freq, 
+                    probe_wn=self.wavenumbers, 
+                    spec2d=iso,
+                ),
+            }
+            return d
+        
+        else:
+            unpol = self.calc_spec()
+            unpol_arr = np.dstack(list(unpol.values())).T 
+            d = {'unpolarized': TwoDim(t=self.t, pump_wn=self.pump_freq, probe_wn=self.wavenumbers, spec2d=unpol_arr)}
+            return d
