@@ -90,12 +90,12 @@ class QCBaseTimeRes(QCFile):
             if self.info["MONO Calibration Type"] == "BASIC":
                 disp_per_grating = {"30": 7.7, "75": 7.7 * 30 / 75.0}
                 disp = disp_per_grating[grating.split()[2]]
-            elif self.info["MONO Calibration Type"] == "ADVANCED":
-                grating_distance = 1/(float(self.info["MONO Grating Grooves"])/1E6) # units of nm
-                k_rad = np.radians(float(self.info["MONO Deviation Angle"])/2) # half deviation angle in radians
+            elif self.info["MONO Calibration Type"] == "ADVANCED": # Calc 1st order dispersion per pixel for constant deviation angle monochromator (most common type)
+                grating_distance = 1/(float(self.info["MONO Grating Grooves"])/1E6)
+                k_rad = np.radians(float(self.info["MONO Deviation Angle"])/2) # half deviation angle (k) in radians
                 beta_rad = np.arcsin(float(self.info["MONO1 Wavelength"])/(2*grating_distance*np.cos(k_rad))) - k_rad # Beta angle in radians
-                recip_linear_disp = grating_distance*np.cos(beta_rad)/float(self.info["MONO Focal Length"]) # Units of (nm/mm). Assumes cos(beta) is approx = 1 and diff order = 1. PI website says this should be 4.17 nm/mm
-                disp = recip_linear_disp * (float(self.info["MONO Pixel Pitch"])/1000) # units of (nm/pixel).
+                recip_linear_disp = grating_distance*np.cos(beta_rad)/float(self.info["MONO Focal Length"])
+                disp = recip_linear_disp * (float(self.info["MONO Pixel Pitch"])/1000)
             else:
                 raise Exception("Monochromator Calibration Type is not supported. Wavelengths must be added manually.")
         pixelcount = int(self.info["Detector Pixels"].split('x')[-1])
